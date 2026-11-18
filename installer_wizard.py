@@ -28,6 +28,30 @@ def get_base_dir():
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
 
+
+def _clean_spawn_env() -> dict:
+    """Strips PyInstaller _PYI_* / _MEI* vars so the launched app unpacks fresh."""
+    env = os.environ.copy()
+    for key in list(env.keys()):
+        upper = key.upper()
+        if (
+            upper.startswith("_PYI_")
+            or upper.startswith("_MEI")
+            or upper in (
+                "PYTHONHOME",
+                "PYTHONPATH",
+                "TCL_LIBRARY",
+                "TK_LIBRARY",
+                "QT_QPA_PLATFORM_PLUGIN_PATH",
+                "QT_PLUGIN_PATH",
+            )
+        ):
+            env.pop(key, None)
+    env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    if "PATH" in env:
+        env["PATH"] = os.pathsep.join(p for p in env["PATH"].split(os.pathsep) if "_MEI" not in p)
+    return env
+
 class WelcomePage(QWizardPage):
     def __init__(self):
         super().__init__()
@@ -254,7 +278,14 @@ class FinishedPage(QWizardPage):
             target_dir = self.dir_page.dir_input.text().strip()
             exe_path = os.path.join(target_dir, "ErpGoPrintService.exe")
             if os.path.exists(exe_path):
-                subprocess.Popen([exe_path], cwd=target_dir)
+                flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                subprocess.Popen(
+                    [exe_path],
+                    cwd=target_dir,
+                    env=_clean_spawn_env(),
+                    creationflags=flags,
+                    close_fds=True,
+                )
         return True
 
 def run_silent_install():
@@ -300,8 +331,14 @@ def run_silent_install():
         pass
 
     if os.path.exists(dest_exe):
-        clean_env = {k: v for k, v in os.environ.items() if not k.upper().startswith("_MEI") and k.upper() not in ("QT_QPA_PLATFORM_PLUGIN_PATH", "QT_PLUGIN_PATH", "TCL_LIBRARY", "TK_LIBRARY")}
-        subprocess.Popen([dest_exe], cwd=target_dir, env=clean_env, close_fds=True)
+        flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        subprocess.Popen(
+            [dest_exe],
+            cwd=target_dir,
+            env=_clean_spawn_env(),
+            creationflags=flags,
+            close_fds=True,
+        )
 
 
 def main():

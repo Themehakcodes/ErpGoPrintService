@@ -56,14 +56,29 @@ def is_newer_version(latest_tag: str, current_ver: str = APP_VERSION) -> bool:
 
 def _clean_spawn_env() -> dict:
     """
-    Returns an environment dict stripped of PyInstaller's dying _MEI* variables
-    so the newly launched updated executable initializes cleanly in its own temp dir.
+    Returns an environment dict stripped of PyInstaller's dying _PYI_* / _MEI*
+    bootloader variables and sets PYINSTALLER_RESET_ENVIRONMENT=1 so any
+    newly launched updated executable unpacks cleanly into its own temp dir.
     """
     env = os.environ.copy()
     for key in list(env.keys()):
         upper = key.upper()
-        if upper.startswith("_MEI") or upper in ("PYINSTALLER_RESET_ENVIRONMENT", "TCL_LIBRARY", "TK_LIBRARY", "QT_QPA_PLATFORM_PLUGIN_PATH", "QT_PLUGIN_PATH"):
+        if (
+            upper.startswith("_PYI_")
+            or upper.startswith("_MEI")
+            or upper in (
+                "PYTHONHOME",
+                "PYTHONPATH",
+                "TCL_LIBRARY",
+                "TK_LIBRARY",
+                "QT_QPA_PLATFORM_PLUGIN_PATH",
+                "QT_PLUGIN_PATH",
+            )
+        ):
             env.pop(key, None)
+    # Official PyInstaller 6.x flag: forces any spawned frozen exe to reset its
+    # bootloader environment and unpack fresh instead of reusing a dead _MEI dir
+    env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
     # Also remove any _MEI* folder entries from PATH
     if "PATH" in env:
         parts = [p for p in env["PATH"].split(os.pathsep) if "_MEI" not in p]
@@ -163,7 +178,18 @@ for ($i = 1; $i -le 30; $i++) {{
     Start-Sleep -Milliseconds 500
 }}
 
-# 3. Relaunch updated executable cleanly from its install folder
+# 3. Scrub any inherited PyInstaller env vars before relaunching
+Get-ChildItem Env: | Where-Object {{
+    $_.Name -match '^(_PYI_|_MEI|PYTHONHOME$|PYTHONPATH$|TCL_LIBRARY$|TK_LIBRARY$|QT_QPA_PLATFORM_PLUGIN_PATH$|QT_PLUGIN_PATH$)'
+}} | ForEach-Object {{
+    Remove-Item "Env:$($_.Name)" -ErrorAction SilentlyContinue
+}}
+$env:PYINSTALLER_RESET_ENVIRONMENT = '1'
+if ($env:PATH) {{
+    $env:PATH = (($env:PATH -split ';') | Where-Object {{ $_ -notmatch '_MEI' }}) -join ';'
+}}
+
+# 4. Relaunch updated executable cleanly from its install folder
 if ($copied) {{
     Start-Sleep -Milliseconds 400
     try {{
