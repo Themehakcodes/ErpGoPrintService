@@ -54,11 +54,29 @@ def is_newer_version(latest_tag: str, current_ver: str = APP_VERSION) -> bool:
     return parse_version(latest_tag) > parse_version(current_ver)
 
 
+def _clean_spawn_env() -> dict:
+    """
+    Returns an environment dict stripped of PyInstaller's dying _MEI* variables
+    so the newly launched updated executable initializes cleanly in its own temp dir.
+    """
+    env = os.environ.copy()
+    for key in list(env.keys()):
+        upper = key.upper()
+        if upper.startswith("_MEI") or upper in ("PYINSTALLER_RESET_ENVIRONMENT", "TCL_LIBRARY", "TK_LIBRARY", "QT_QPA_PLATFORM_PLUGIN_PATH", "QT_PLUGIN_PATH"):
+            env.pop(key, None)
+    # Also remove any _MEI* folder entries from PATH
+    if "PATH" in env:
+        parts = [p for p in env["PATH"].split(os.pathsep) if "_MEI" not in p]
+        env["PATH"] = os.pathsep.join(parts)
+    return env
+
+
 def launch_silent_self_update(downloaded_path: str, asset_type: str = "direct_exe") -> tuple[bool, str]:
     """
     Applies a downloaded update seamlessly without user clicks.
-    - For direct ErpGoPrintService.exe: swaps the running binary after PID exit and relaunches it.
-    - For KCSM_PrintService_Setup.exe: launches the setup wizard in --silent mode.
+    - Uses a detached PowerShell updater script (never relies on cmd.exe or timeout.exe,
+      waits for BOTH PyInstaller child & bootloader parent processes to release the file lock,
+      copies + verifies size, strips _MEIPASS env, and launches the updated executable).
     Only executes in-place replacement when running as a frozen PyInstaller .exe.
     """
     if not downloaded_path or not os.path.exists(downloaded_path):
@@ -68,10 +86,12 @@ def launch_silent_self_update(downloaded_path: str, asset_type: str = "direct_ex
     if os.path.getsize(downloaded_path) < 5 * 1024 * 1024:
         return False, "Downloaded file appears incomplete or invalid."
 
+    clean_env = _clean_spawn_env()
+    create_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+
     if asset_type == "setup_exe":
         try:
-            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
-            subprocess.Popen([downloaded_path, "--silent"], creationflags=flags, close_fds=True)
+            subprocess.Popen([downloaded_path, "--silent"], creationflags=create_flags, env=clean_env, close_fds=True)
             return True, "Silent installer launched."
         except Exception as e:
             return False, str(e)
@@ -80,46 +100,96 @@ def launch_silent_self_update(downloaded_path: str, asset_type: str = "direct_ex
     if not getattr(sys, "frozen", False):
         return False, "Running from Python source; skipping binary self-swap."
 
-    current_exe = sys.executable
-    current_pid = os.getpid()
-    bat_dir = os.path.dirname(downloaded_path)
-    bat_path = os.path.join(bat_dir, "kcsm_apply_update.bat")
+    current_exe = os.path.abspath(sys.executable)
+    exe_proc_name = os.path.splitext(os.path.basename(current_exe))[0]
+    work_dir = os.path.dirname(current_exe)
+    ps_dir = os.path.dirname(os.path.abspath(downloaded_path))
+    ps_path = os.path.join(ps_dir, "kcsm_apply_update.ps1")
+    log_path = os.path.join(ps_dir, "updater.log")
 
-    bat_script = f'''@echo off
-setlocal
-set "SRC={downloaded_path}"
-set "DST={current_exe}"
-set "PID={current_pid}"
+    # Escape single quotes for PowerShell string literals
+    src_ps = os.path.abspath(downloaded_path).replace("'", "''")
+    dst_ps = current_exe.replace("'", "''")
+    dir_ps = work_dir.replace("'", "''")
+    proc_ps = exe_proc_name.replace("'", "''")
+    log_ps = log_path.replace("'", "''")
 
-:waitloop
-tasklist /FI "PID eq %PID%" 2>NUL | find /I "%PID%" >NUL
-if "%ERRORLEVEL%"=="0" (
-    timeout /t 1 /nobreak >NUL
-    goto waitloop
-)
+    ps_script = f"""$ErrorActionPreference = 'SilentlyContinue'
+$src = '{src_ps}'
+$dst = '{dst_ps}'
+$workDir = '{dir_ps}'
+$procName = '{proc_ps}'
+$logFile = '{log_ps}'
 
-set /a tries=0
-:copyloop
-copy /Y "%SRC%" "%DST%" >NUL 2>&1
-if "%ERRORLEVEL%"=="0" goto launch
-set /a tries+=1
-if %tries% GEQ 20 goto cleanup
-timeout /t 1 /nobreak >NUL
-goto copyloop
+function Write-Log($msg) {{
+    $ts = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+    Add-Content -Path $logFile -Value "[$ts] $msg" -Encoding utf8
+}}
 
-:launch
-start "" "%DST%"
+Write-Log "Updater started. SRC=$src -> DST=$dst"
 
-:cleanup
-del /F /Q "%SRC%" >NUL 2>&1
-del /F /Q "%~f0" >NUL 2>&1
-'''
+# 1. Wait for BOTH PyInstaller Python child and bootloader parent processes to exit
+$waited = 0
+while ($waited -lt 20) {{
+    $running = Get-Process -Name $procName -ErrorAction SilentlyContinue
+    if (-not $running) {{ break }}
+    Start-Sleep -Milliseconds 500
+    $waited++
+}}
+
+# Force-close any lingering process still locking the exe
+$stillRunning = Get-Process -Name $procName -ErrorAction SilentlyContinue
+if ($stillRunning) {{
+    Write-Log "Force-stopping lingering $procName process(es)..."
+    $stillRunning | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 800
+}}
+
+# 2. Copy new executable with retries and byte-size verification
+$expectedSize = (Get-Item -LiteralPath $src).Length
+$copied = $false
+for ($i = 1; $i -le 30; $i++) {{
+    try {{
+        Copy-Item -LiteralPath $src -Destination $dst -Force -ErrorAction Stop
+        $actualSize = (Get-Item -LiteralPath $dst).Length
+        if ($actualSize -eq $expectedSize) {{
+            $copied = $true
+            Write-Log "Copied $actualSize bytes cleanly on attempt $i."
+            break
+        }}
+    }} catch {{
+        Write-Log "Attempt $i copy retry: $($_.Exception.Message)"
+    }}
+    Start-Sleep -Milliseconds 500
+}}
+
+# 3. Relaunch updated executable cleanly from its install folder
+if ($copied) {{
+    Start-Sleep -Milliseconds 400
+    try {{
+        Start-Process -FilePath $dst -WorkingDirectory $workDir
+        Write-Log "Relaunched updated $dst successfully."
+    }} catch {{
+        Write-Log "Relaunch failed: $($_.Exception.Message)"
+    }}
+    Remove-Item -LiteralPath $src -Force -ErrorAction SilentlyContinue
+}} else {{
+    Write-Log "ERROR: Could not overwrite $dst after 30 retries. Relaunching existing exe."
+    Start-Process -FilePath $dst -WorkingDirectory $workDir
+}}
+
+Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
+"""
     try:
-        with open(bat_path, "w", encoding="utf-8") as f:
-            f.write(bat_script)
-        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
-        subprocess.Popen(["cmd.exe", "/C", bat_path], creationflags=flags, close_fds=True)
-        return True, "Silent self-update scheduled."
+        with open(ps_path, "w", encoding="utf-8") as f:
+            f.write(ps_script)
+        subprocess.Popen(
+            ["powershell.exe", "-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-File", ps_path],
+            creationflags=create_flags,
+            env=clean_env,
+            close_fds=True,
+        )
+        return True, "Silent PowerShell self-update scheduled."
     except Exception as e:
         return False, str(e)
 

@@ -300,7 +300,8 @@ def run_silent_install():
         pass
 
     if os.path.exists(dest_exe):
-        subprocess.Popen([dest_exe], cwd=target_dir, close_fds=True)
+        clean_env = {k: v for k, v in os.environ.items() if not k.upper().startswith("_MEI") and k.upper() not in ("QT_QPA_PLATFORM_PLUGIN_PATH", "QT_PLUGIN_PATH", "TCL_LIBRARY", "TK_LIBRARY")}
+        subprocess.Popen([dest_exe], cwd=target_dir, env=clean_env, close_fds=True)
 
 
 def main():

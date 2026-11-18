@@ -12,7 +12,7 @@ import sys
 import time
 from collections import deque
 from PyQt6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QLineEdit, QPushButton, QComboBox, QTableWidget, QTableWidgetItem,
     QHeaderView, QTextEdit, QFrame, QMessageBox, QTabWidget,
     QAbstractItemView, QCheckBox, QProgressBar, QScrollArea
@@ -510,6 +510,11 @@ class MainWindow(QMainWindow):
         self.auto_update_timer.stop()
         if self.ws_worker:
             self.ws_worker.stop()
+        if hasattr(self, "tray_manager") and getattr(self.tray_manager, "tray_icon", None):
+            self.tray_manager.tray_icon.hide()
+        app = QApplication.instance()
+        if app:
+            app.quit()
         sys.exit(0)
 
     # ─── Live Printer Busy / Spooler Progress Bar ───
