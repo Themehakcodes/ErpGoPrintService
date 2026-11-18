@@ -1,0 +1,15 @@
+{
+    "server_url": "wss://erp.kcsmtraders.com/ws/print-service",
+    "device_code": "DEV-0002",
+    "secret_key": "",
+    "selected_printer": "",
+    "printer_mode": "TSPL",
+    "auto_connect": true,
+    "minimize_to_tray": true,
+    "sound_alerts": true,
+    "autostart_with_windows": true,
+    "prompt_printer_on_startup": false,
+    "auto_check_updates": true,
+    "github_repo": "Themehakcodes/ErpGoPrintService",
+    "github_token": ""
+}

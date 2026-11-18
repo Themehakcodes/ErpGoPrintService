@@ -1,0 +1,31 @@
+# Python bytecode & caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# PyInstaller build outputs & executables (upload these to GitHub Releases instead)
+build/
+dist/
+*.exe
+*.spec
+
+# Local machine state & secrets (use config.example.json as the tracked template)
+config.json
+ledger.json
+*.log
+dialog_preview.png
+
+# OS & IDE artifacts
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
