@@ -28,7 +28,7 @@ from core.ledger import JobLedger
 from core.ws_client import WebSocketWorker
 from core.autostart import is_autostart_enabled, set_autostart
 from core.version import APP_VERSION, DEFAULT_GITHUB_REPO
-from core.updater import UpdateCheckWorker, UpdateDownloadWorker
+from core.updater import UpdateCheckWorker, UpdateDownloadWorker, has_embedded_updater_token
 from .styles import QSS_THEME
 from .tray_icon import SystemTrayManager
 
@@ -413,11 +413,21 @@ class MainWindow(QMainWindow):
         self.github_repo_input.setPlaceholderText("owner/repo (e.g. Themehakcodes/ErpGoPrintService)")
         u_grid.addWidget(self.github_repo_input, 0, 1)
 
-        u_grid.addWidget(QLabel("Access Token:"), 1, 0)
-        self.github_token_input = QLineEdit(self.cfg.get("github_token", ""))
-        self.github_token_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.github_token_input.setPlaceholderText("(Optional — only needed for private repos)")
-        u_grid.addWidget(self.github_token_input, 1, 1)
+        if has_embedded_updater_token():
+            auth_badge = QLabel("🔒 Release Auth: Built-in (Managed automatically)")
+            auth_badge.setStyleSheet(
+                "color: #059669; background-color: #ecfdf5; border: 1px solid #a7f3d0; "
+                "border-radius: 6px; padding: 6px 10px; font-size: 12px; font-weight: 600;"
+            )
+            u_grid.addWidget(auth_badge, 1, 0, 1, 2)
+            self.github_token_input = QLineEdit(self.cfg.get("github_token", ""))
+            self.github_token_input.setVisible(False)
+        else:
+            u_grid.addWidget(QLabel("Access Token:"), 1, 0)
+            self.github_token_input = QLineEdit(self.cfg.get("github_token", ""))
+            self.github_token_input.setEchoMode(QLineEdit.EchoMode.Password)
+            self.github_token_input.setPlaceholderText("(Optional — only needed for private repos)")
+            u_grid.addWidget(self.github_token_input, 1, 1)
         u_layout.addLayout(u_grid)
 
         u_btn_row = QHBoxLayout()

@@ -5,17 +5,21 @@ echo ========================================================
 
 cd /d "%~dp0"
 
-echo [1/3] Checking dependencies...
+echo [1/4] Checking dependencies...
 python -m pip install -r requirements.txt
 python -m pip install pyinstaller
 
-echo [2/3] Building main Desktop Agent (ErpGoPrintService.exe)...
+echo [2/4] Injecting build-time release updater key (from env or .env.build)...
+python scripts\inject_build_secrets.py
+
+echo [3/4] Building main Desktop Agent (ErpGoPrintService.exe)...
 pyinstaller --noconsole ^
             --onefile ^
             --name "ErpGoPrintService" ^
             --hidden-import "win32print" ^
             --hidden-import "win32api" ^
             --hidden-import "websockets" ^
+            --hidden-import "core._build_secrets" ^
             --hidden-import "PyQt6" ^
             --hidden-import "PyQt6.QtCore" ^
             --hidden-import "PyQt6.QtGui" ^
@@ -23,9 +27,9 @@ pyinstaller --noconsole ^
             --hidden-import "PyQt6.QtNetwork" ^
             --collect-all PyQt6 ^
             --collect-all websockets ^
-            main.py
+            main.py -y
 
-echo [3/3] Building Standalone Graphical Installer (KCSM_PrintService_Setup.exe)...
+echo [4/4] Building Standalone Graphical Installer (KCSM_PrintService_Setup.exe)...
 pyinstaller --noconsole ^
             --onefile ^
             --name "KCSM_PrintService_Setup" ^

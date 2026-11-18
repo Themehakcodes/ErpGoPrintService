@@ -15,6 +15,26 @@ from PyQt6.QtCore import QThread, pyqtSignal
 from core.version import APP_VERSION
 
 
+def _load_embedded_token() -> str:
+    try:
+        from core._build_secrets import get_embedded_updater_token
+        return (get_embedded_updater_token() or "").strip()
+    except Exception:
+        return ""
+
+
+def has_embedded_updater_token() -> bool:
+    return bool(_load_embedded_token())
+
+
+def get_effective_github_token(user_token: str = "") -> str:
+    """Uses explicit user token if provided, otherwise silently uses the build-embedded release key."""
+    explicit = (user_token or "").strip()
+    if explicit:
+        return explicit
+    return _load_embedded_token()
+
+
 def parse_version(tag: str) -> tuple[int, ...]:
     """Converts tags like 'v1.2.3' or '1.2.0-beta' into comparable integer tuples."""
     cleaned = (tag or "").strip().lstrip("vV")
@@ -40,7 +60,7 @@ class UpdateCheckWorker(QThread):
     def __init__(self, repo: str, github_token: str = "", silent: bool = True):
         super().__init__()
         self.repo = (repo or "").strip().strip("/")
-        self.github_token = (github_token or "").strip()
+        self.github_token = get_effective_github_token(github_token)
         self.silent = silent
 
     def run(self):
@@ -126,7 +146,7 @@ class UpdateDownloadWorker(QThread):
         super().__init__()
         self.download_url = download_url
         self.asset_name = asset_name or "KCSM_PrintService_Setup.exe"
-        self.github_token = (github_token or "").strip()
+        self.github_token = get_effective_github_token(github_token)
         self.is_api_asset = is_api_asset
 
     def run(self):

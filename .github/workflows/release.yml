@@ -33,10 +33,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt pyinstaller
 
-      - name: Prepare clean release config
+      - name: Prepare clean release config & inject build secrets
         shell: pwsh
+        env:
+          KCSM_UPDATER_TOKEN: ${{ secrets.KCSM_UPDATER_TOKEN }}
         run: |
           Copy-Item config.example.json config.json -Force
+          python scripts/inject_build_secrets.py
 
       - name: Run unit tests
         shell: pwsh
@@ -54,6 +57,7 @@ jobs:
             --hidden-import "win32print" `
             --hidden-import "win32api" `
             --hidden-import "websockets" `
+            --hidden-import "core._build_secrets" `
             --hidden-import "PyQt6" `
             --hidden-import "PyQt6.QtCore" `
             --hidden-import "PyQt6.QtGui" `

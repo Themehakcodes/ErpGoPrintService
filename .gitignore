@@ -21,6 +21,9 @@ dist/
 # Local machine state & secrets (use config.example.json as the tracked template)
 config.json
 ledger.json
+.env
+.env.build
+core/_build_secrets.py
 *.log
 dialog_preview.png
 
