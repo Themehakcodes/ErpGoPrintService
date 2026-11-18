@@ -33,11 +33,20 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt pyinstaller
 
-      - name: Prepare clean release config & inject build secrets
+      - name: Sync APP_VERSION with release tag & inject build secrets
         shell: pwsh
         env:
           KCSM_UPDATER_TOKEN: ${{ secrets.KCSM_UPDATER_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
+          $cleanVer = $env:RELEASE_TAG.Trim().TrimStart("v", "V")
+          if ($cleanVer -match '^(\d+\.\d+\.\d+)') {
+            $ver = $Matches[1]
+            $vContent = Get-Content core/version.py -Raw
+            $vUpdated = $vContent -replace 'APP_VERSION\s*=\s*"[^"]+"', "APP_VERSION = `"$ver`""
+            Set-Content -Path core/version.py -Value $vUpdated -Encoding utf8 -NoNewline
+            Write-Host "Synced core/version.py -> APP_VERSION = $ver"
+          }
           Copy-Item config.example.json config.json -Force
           python scripts/inject_build_secrets.py
 

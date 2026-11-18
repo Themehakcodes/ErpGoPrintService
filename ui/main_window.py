@@ -8,10 +8,8 @@ Includes:
 - GitHub Releases Auto-Update checker & 1-click installer
 """
 
-import subprocess
 import sys
 import time
-import webbrowser
 from collections import deque
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
@@ -28,7 +26,7 @@ from core.ledger import JobLedger
 from core.ws_client import WebSocketWorker
 from core.autostart import is_autostart_enabled, set_autostart
 from core.version import APP_VERSION, DEFAULT_GITHUB_REPO
-from core.updater import UpdateCheckWorker, UpdateDownloadWorker, has_embedded_updater_token
+from core.updater import UpdateCheckWorker, UpdateDownloadWorker, launch_silent_self_update
 from .styles import QSS_THEME
 from .tray_icon import SystemTrayManager
 
@@ -70,15 +68,22 @@ class MainWindow(QMainWindow):
         self._busy_min_until = 0.0
         self._last_printed_summary = ""
 
-        # GitHub auto-updater state
+        # GitHub silent auto-updater state
         self._update_check_worker = None
         self._update_download_worker = None
         self._latest_release_info = None
+        self._pending_update_apply = None  # (downloaded_path, asset_type, version)
+        self._update_in_progress = False
 
         # Spooler activity monitor timer (runs only while busy)
         self.spooler_timer = QTimer(self)
         self.spooler_timer.setInterval(650)
         self.spooler_timer.timeout.connect(self._poll_spooler_activity)
+
+        # Periodic silent GitHub release check (every 30 minutes)
+        self.auto_update_timer = QTimer(self)
+        self.auto_update_timer.setInterval(30 * 60 * 1000)
+        self.auto_update_timer.timeout.connect(self._check_for_updates_silent)
 
         # Initialize UI & Tray
         self._init_ui()
@@ -94,9 +99,9 @@ class MainWindow(QMainWindow):
         if self.cfg.get("auto_connect", True):
             QTimer.singleShot(600, self._handle_connect_toggle)
 
-        # Silent GitHub update check 5 seconds after boot
-        if self.cfg.get("auto_check_updates", True):
-            QTimer.singleShot(5000, lambda: self._check_for_updates(silent=True))
+        # Silent GitHub auto-update check 5 seconds after boot + every 30 minutes
+        QTimer.singleShot(5000, self._check_for_updates_silent)
+        self.auto_update_timer.start()
 
     def _init_ui(self):
         central = QWidget()
@@ -166,40 +171,28 @@ class MainWindow(QMainWindow):
         return frame
 
     def _build_update_banner(self) -> QFrame:
+        """Minimal unobtrusive banner shown ONLY while an automatic update is actively downloading/installing."""
         banner = QFrame()
         banner.setStyleSheet(
             "QFrame { background-color: #eef2ff; border: 1px solid #c7d2fe; border-radius: 10px; }"
         )
         layout = QHBoxLayout(banner)
-        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setContentsMargins(14, 9, 14, 9)
         layout.setSpacing(10)
 
-        self.update_banner_lbl = QLabel("🚀 A new version of KCSM Print Service is available!")
-        self.update_banner_lbl.setStyleSheet("color: #3730a3; font-weight: 700; font-size: 13px; border: none; background: transparent;")
+        self.update_banner_lbl = QLabel("🔄 Updating KCSM Print Service in background...")
+        self.update_banner_lbl.setStyleSheet("color: #3730a3; font-weight: 700; font-size: 12px; border: none; background: transparent;")
         layout.addWidget(self.update_banner_lbl, 1)
 
         self.update_dl_progress = QProgressBar()
         self.update_dl_progress.setRange(0, 100)
-        self.update_dl_progress.setFixedWidth(150)
+        self.update_dl_progress.setFixedWidth(180)
         self.update_dl_progress.setFixedHeight(14)
-        self.update_dl_progress.setVisible(False)
         self.update_dl_progress.setStyleSheet(
             "QProgressBar { border: 1px solid #c7d2fe; border-radius: 7px; background: #ffffff; text-align: center; font-size: 10px; font-weight: 700; color: #3730a3; }"
             "QProgressBar::chunk { background-color: #6366f1; border-radius: 6px; }"
         )
         layout.addWidget(self.update_dl_progress)
-
-        self.install_update_btn = QPushButton("Download && Install")
-        self.install_update_btn.setObjectName("PrimaryBtn")
-        self.install_update_btn.setStyleSheet("padding: 6px 14px; font-size: 12px; font-weight: 700;")
-        self.install_update_btn.clicked.connect(self._handle_download_update)
-        layout.addWidget(self.install_update_btn)
-
-        dismiss_btn = QPushButton("Later")
-        dismiss_btn.setObjectName("SecondaryBtn")
-        dismiss_btn.setStyleSheet("padding: 6px 12px; font-size: 12px;")
-        dismiss_btn.clicked.connect(lambda: self.update_banner.setVisible(False))
-        layout.addWidget(dismiss_btn)
 
         return banner
 
@@ -351,106 +344,42 @@ class MainWindow(QMainWindow):
         cards_layout.addWidget(self._build_printer_card(), 1)
         layout.addLayout(cards_layout)
 
-        # ── Row 2: Windows System & Auto-Update Preferences ──
-        row2 = QHBoxLayout()
-        row2.setSpacing(14)
-
-        # Windows Startup Preferences Card
+        # ── Row 2: Windows System & Startup Preferences (Clean, Software Updates Hidden) ──
         sys_card = QFrame()
         sys_card.setObjectName("CardFrame")
         s_layout = QVBoxLayout(sys_card)
-        s_layout.setContentsMargins(16, 14, 16, 14)
-        s_layout.setSpacing(9)
+        s_layout.setContentsMargins(18, 14, 18, 14)
+        s_layout.setSpacing(10)
 
         s_title = QLabel("Windows System & Startup Preferences")
         s_title.setObjectName("CardTitle")
-        s_sub = QLabel("Configure boot auto-launch, printer prompt, and tray behavior")
+        s_sub = QLabel("Configure automatic boot launch, printer prompts, and notification area behavior")
         s_sub.setObjectName("CardSubtitle")
         s_layout.addWidget(s_title)
         s_layout.addWidget(s_sub)
 
         self.autostart_chk = QCheckBox("Automatically start KCSM Print Service when Windows boots")
         self.autostart_chk.setChecked(self.cfg.get("autostart_with_windows", True) or is_autostart_enabled())
-        self.autostart_chk.setStyleSheet("font-size: 12px; color: #334155; font-weight: 600;")
+        self.autostart_chk.setStyleSheet("font-size: 13px; color: #334155; font-weight: 600;")
         s_layout.addWidget(self.autostart_chk)
 
         self.prompt_chk = QCheckBox("Prompt for printer selection on every startup")
         self.prompt_chk.setChecked(self.cfg.get("prompt_printer_on_startup", False))
-        self.prompt_chk.setStyleSheet("font-size: 12px; color: #334155; font-weight: 600;")
+        self.prompt_chk.setStyleSheet("font-size: 13px; color: #334155; font-weight: 600;")
         s_layout.addWidget(self.prompt_chk)
 
-        self.tray_chk = QCheckBox("Minimize to Windows System Tray on close (runs in background)")
+        self.tray_chk = QCheckBox("Minimize to Windows System Tray on close (keeps agent listening in background)")
         self.tray_chk.setChecked(self.cfg.get("minimize_to_tray", True))
-        self.tray_chk.setStyleSheet("font-size: 12px; color: #334155; font-weight: 600;")
+        self.tray_chk.setStyleSheet("font-size: 13px; color: #334155; font-weight: 600;")
         s_layout.addWidget(self.tray_chk)
 
-        self.autoupdate_chk = QCheckBox("Automatically check GitHub for updates on startup")
-        self.autoupdate_chk.setChecked(self.cfg.get("auto_check_updates", True))
-        self.autoupdate_chk.setStyleSheet("font-size: 12px; color: #334155; font-weight: 600;")
-        s_layout.addWidget(self.autoupdate_chk)
-        s_layout.addStretch()
-
-        row2.addWidget(sys_card, 1)
-
-        # GitHub Software Updates Card
-        upd_card = QFrame()
-        upd_card.setObjectName("CardFrame")
-        u_layout = QVBoxLayout(upd_card)
-        u_layout.setContentsMargins(16, 14, 16, 14)
-        u_layout.setSpacing(9)
-
-        u_title = QLabel(f"Software Updates (Current: v{APP_VERSION})")
-        u_title.setObjectName("CardTitle")
-        u_sub = QLabel("Checks GitHub Releases for newer KCSM Print Service builds")
-        u_sub.setObjectName("CardSubtitle")
-        u_layout.addWidget(u_title)
-        u_layout.addWidget(u_sub)
-
-        u_grid = QGridLayout()
-        u_grid.setSpacing(8)
-        u_grid.addWidget(QLabel("GitHub Repo:"), 0, 0)
-        self.github_repo_input = QLineEdit(self.cfg.get("github_repo", DEFAULT_GITHUB_REPO))
-        self.github_repo_input.setPlaceholderText("owner/repo (e.g. Themehakcodes/ErpGoPrintService)")
-        u_grid.addWidget(self.github_repo_input, 0, 1)
-
-        if has_embedded_updater_token():
-            auth_badge = QLabel("🔒 Release Auth: Built-in (Managed automatically)")
-            auth_badge.setStyleSheet(
-                "color: #059669; background-color: #ecfdf5; border: 1px solid #a7f3d0; "
-                "border-radius: 6px; padding: 6px 10px; font-size: 12px; font-weight: 600;"
-            )
-            u_grid.addWidget(auth_badge, 1, 0, 1, 2)
-            self.github_token_input = QLineEdit(self.cfg.get("github_token", ""))
-            self.github_token_input.setVisible(False)
-        else:
-            u_grid.addWidget(QLabel("Access Token:"), 1, 0)
-            self.github_token_input = QLineEdit(self.cfg.get("github_token", ""))
-            self.github_token_input.setEchoMode(QLineEdit.EchoMode.Password)
-            self.github_token_input.setPlaceholderText("(Optional — only needed for private repos)")
-            u_grid.addWidget(self.github_token_input, 1, 1)
-        u_layout.addLayout(u_grid)
-
-        u_btn_row = QHBoxLayout()
-        self.update_status_lbl = QLabel(f"Installed version: v{APP_VERSION}")
-        self.update_status_lbl.setStyleSheet("font-size: 12px; color: #64748b; font-weight: 600;")
-        u_btn_row.addWidget(self.update_status_lbl, 1)
-
-        self.check_update_btn = QPushButton("🔄 Check for Updates")
-        self.check_update_btn.setObjectName("OutlineBtn")
-        self.check_update_btn.clicked.connect(lambda: self._check_for_updates(silent=False))
-        u_btn_row.addWidget(self.check_update_btn)
-        u_layout.addLayout(u_btn_row)
-
-        row2.addWidget(upd_card, 1)
-        layout.addLayout(row2)
-
-        # Save All Button
         save_sys_btn = QPushButton("Save All Settings && Apply")
         save_sys_btn.setObjectName("PrimaryBtn")
         save_sys_btn.setStyleSheet("min-width: 220px; padding: 10px 22px; font-weight: 700;")
         save_sys_btn.clicked.connect(self._handle_save_config)
-        layout.addWidget(save_sys_btn, alignment=Qt.AlignmentFlag.AlignRight)
+        s_layout.addWidget(save_sys_btn, alignment=Qt.AlignmentFlag.AlignRight)
 
+        layout.addWidget(sys_card)
         layout.addStretch()
         scroll.setWidget(widget)
         return scroll
@@ -578,6 +507,7 @@ class MainWindow(QMainWindow):
 
     def _handle_force_quit(self):
         self.spooler_timer.stop()
+        self.auto_update_timer.stop()
         if self.ws_worker:
             self.ws_worker.stop()
         sys.exit(0)
@@ -656,96 +586,87 @@ class MainWindow(QMainWindow):
         else:
             self._set_printer_busy_ui(False)
             self.spooler_timer.stop()
+            self._apply_pending_update_if_idle()
 
-    # ─── GitHub Auto-Update ───
+    # ─── Silent Background GitHub Auto-Updater ───
 
-    def _check_for_updates(self, silent: bool = False):
-        repo = (self.github_repo_input.text().strip() if hasattr(self, "github_repo_input") else self.cfg.get("github_repo", DEFAULT_GITHUB_REPO))
-        token = (self.github_token_input.text().strip() if hasattr(self, "github_token_input") else self.cfg.get("github_token", ""))
+    def _check_for_updates_silent(self):
+        """Silently checks GitHub Releases and auto-downloads/installs newer builds when idle."""
+        if self._update_in_progress:
+            return
+        repo = self.cfg.get("github_repo", DEFAULT_GITHUB_REPO) or DEFAULT_GITHUB_REPO
+        token = self.cfg.get("github_token", "")
 
-        if not silent:
-            self.check_update_btn.setEnabled(False)
-            self.check_update_btn.setText("Checking...")
-            self.update_status_lbl.setText("Checking GitHub Releases...")
-
-        self._update_check_worker = UpdateCheckWorker(repo, token, silent=silent)
-        self._update_check_worker.update_available.connect(self._on_update_available)
-        self._update_check_worker.up_to_date.connect(lambda v: self._on_up_to_date(v, silent))
-        self._update_check_worker.check_failed.connect(lambda err: self._on_update_check_failed(err, silent))
+        self._update_check_worker = UpdateCheckWorker(repo, token, silent=True, prefer_direct_exe=True)
+        self._update_check_worker.update_available.connect(self._on_update_available_auto)
+        self._update_check_worker.up_to_date.connect(lambda v: self._log("INFO", f"Agent is up to date (v{v})."))
+        self._update_check_worker.check_failed.connect(lambda err: self._log("INFO", f"Auto-update check skipped: {err}"))
         self._update_check_worker.start()
 
     @pyqtSlot(dict)
-    def _on_update_available(self, info: dict):
-        self._latest_release_info = info
-        self.check_update_btn.setEnabled(True)
-        self.check_update_btn.setText("🔄 Check for Updates")
-        ver = info.get("version", "")
-        self.update_status_lbl.setText(f"Update available: v{ver} (current v{APP_VERSION})")
-        self.update_status_lbl.setStyleSheet("font-size: 12px; color: #4f46e5; font-weight: 700;")
-        self.update_banner_lbl.setText(f"🚀 Update Available: v{ver} is ready on GitHub (current: v{APP_VERSION})")
-        self.update_banner.setVisible(True)
-        self._log("INFO", f"New GitHub Release detected: v{ver} ({info.get('html_url')})")
-
-    def _on_up_to_date(self, current_ver: str, silent: bool):
-        self.check_update_btn.setEnabled(True)
-        self.check_update_btn.setText("🔄 Check for Updates")
-        self.update_status_lbl.setText(f"Up to date (v{current_ver})")
-        self.update_status_lbl.setStyleSheet("font-size: 12px; color: #059669; font-weight: 600;")
-        if not silent:
-            QMessageBox.information(self, "Up to Date", f"KCSM Print Service v{current_ver} is the latest version.")
-
-    def _on_update_check_failed(self, err: str, silent: bool):
-        self.check_update_btn.setEnabled(True)
-        self.check_update_btn.setText("🔄 Check for Updates")
-        if not silent:
-            self.update_status_lbl.setText(f"Check failed: {err}")
-            self.update_status_lbl.setStyleSheet("font-size: 12px; color: #dc2626; font-weight: 600;")
-            QMessageBox.warning(self, "Update Check", f"Could not check GitHub for updates:\n{err}")
-
-    def _handle_download_update(self):
-        info = self._latest_release_info
-        if not info:
+    def _on_update_available_auto(self, info: dict):
+        if self._update_in_progress:
             return
         dl_url = info.get("download_url")
         if not dl_url:
-            webbrowser.open(info.get("html_url", "https://github.com"))
             return
 
-        token = self.github_token_input.text().strip() if hasattr(self, "github_token_input") else self.cfg.get("github_token", "")
-        self.install_update_btn.setEnabled(False)
-        self.install_update_btn.setText("Downloading...")
-        self.update_dl_progress.setValue(0)
-        self.update_dl_progress.setVisible(True)
+        self._update_in_progress = True
+        self._latest_release_info = info
+        ver = info.get("version", "")
+        self._log("INFO", f"New release v{ver} detected on GitHub. Downloading automatically in background...")
 
+        self.update_banner_lbl.setText(f"🔄 Auto-updating KCSM Print Service to v{ver}...")
+        self.update_dl_progress.setValue(0)
+        self.update_banner.setVisible(True)
+
+        token = self.cfg.get("github_token", "")
         self._update_download_worker = UpdateDownloadWorker(
             dl_url,
-            info.get("asset_name", "KCSM_PrintService_Setup.exe"),
+            info.get("asset_name", "ErpGoPrintService.exe"),
             github_token=token,
             is_api_asset=bool(info.get("is_api_asset")),
         )
         self._update_download_worker.progress_signal.connect(self.update_dl_progress.setValue)
-        self._update_download_worker.finished_signal.connect(self._on_update_downloaded)
-        self._update_download_worker.error_signal.connect(self._on_update_download_error)
+        self._update_download_worker.finished_signal.connect(self._on_update_downloaded_auto)
+        self._update_download_worker.error_signal.connect(self._on_update_download_error_auto)
         self._update_download_worker.start()
 
     @pyqtSlot(str)
-    def _on_update_downloaded(self, installer_path: str):
-        self.install_update_btn.setText("Launching Installer...")
-        self._log("SUCCESS", f"Update downloaded to {installer_path}. Launching installer...")
-        try:
-            subprocess.Popen([installer_path], close_fds=True)
-            QTimer.singleShot(800, self._handle_force_quit)
-        except Exception as e:
-            self.install_update_btn.setEnabled(True)
-            self.install_update_btn.setText("Download && Install")
-            QMessageBox.critical(self, "Launch Failed", f"Downloaded to:\n{installer_path}\n\nCould not auto-launch: {e}")
+    def _on_update_downloaded_auto(self, downloaded_path: str):
+        info = self._latest_release_info or {}
+        ver = info.get("version", "")
+        asset_type = info.get("asset_type", "direct_exe")
+        self._pending_update_apply = (downloaded_path, asset_type, ver)
+        self._log("SUCCESS", f"Downloaded v{ver} update. Waiting for printer idle to install...")
+        self.update_banner_lbl.setText(f"⚡ Update v{ver} ready — installing automatically once printer is idle...")
+        self._apply_pending_update_if_idle()
+
+    def _apply_pending_update_if_idle(self):
+        if not self._pending_update_apply:
+            return
+        # Never interrupt an active print job or queued batch
+        if self._active_print_ctx is not None or len(self._dispatch_queue) > 0:
+            return
+
+        downloaded_path, asset_type, ver = self._pending_update_apply
+        self._pending_update_apply = None
+
+        ok, msg = launch_silent_self_update(downloaded_path, asset_type=asset_type)
+        if ok:
+            self._log("SUCCESS", f"Applying v{ver} silently and restarting agent...")
+            self.tray_manager.notify("KCSM Print Service", f"Updating automatically to v{ver}...")
+            QTimer.singleShot(400, self._handle_force_quit)
+        else:
+            self._update_in_progress = False
+            self.update_banner.setVisible(False)
+            self._log("INFO", f"Deferred binary self-update: {msg}")
 
     @pyqtSlot(str)
-    def _on_update_download_error(self, err: str):
-        self.install_update_btn.setEnabled(True)
-        self.install_update_btn.setText("Download && Install")
-        self.update_dl_progress.setVisible(False)
-        QMessageBox.critical(self, "Download Failed", f"Failed to download update:\n{err}")
+    def _on_update_download_error_auto(self, err: str):
+        self._update_in_progress = False
+        self.update_banner.setVisible(False)
+        self._log("WARN", f"Background update download failed (will retry later): {err}")
 
     # ─── Configuration & Printers ───
 
@@ -784,12 +705,6 @@ class MainWindow(QMainWindow):
             self.cfg["prompt_printer_on_startup"] = self.prompt_chk.isChecked()
         if hasattr(self, 'tray_chk'):
             self.cfg["minimize_to_tray"] = self.tray_chk.isChecked()
-        if hasattr(self, 'autoupdate_chk'):
-            self.cfg["auto_check_updates"] = self.autoupdate_chk.isChecked()
-        if hasattr(self, 'github_repo_input'):
-            self.cfg["github_repo"] = self.github_repo_input.text().strip()
-        if hasattr(self, 'github_token_input'):
-            self.cfg["github_token"] = self.github_token_input.text().strip()
 
         if hasattr(self, 'active_printer_pill'):
             p_name = self.cfg.get('selected_printer', 'No Printer')

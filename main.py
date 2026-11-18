@@ -65,7 +65,6 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("KCSM Print Service")
     app.setOrganizationName("KCSM")
-    app.setApplicationDisplayName("KCSM Print Service — Desktop Agent")
     
     icon = generate_app_icon()
     app.setWindowIcon(icon)

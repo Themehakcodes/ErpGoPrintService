@@ -257,7 +257,57 @@ class FinishedPage(QWizardPage):
                 subprocess.Popen([exe_path], cwd=target_dir)
         return True
 
+def run_silent_install():
+    """Headless silent upgrade/install invoked by --silent flag (zero GUI popups)."""
+    import subprocess
+    import time
+
+    target_dir = DEFAULT_INSTALL_DIR
+    os.makedirs(target_dir, exist_ok=True)
+    base_dir = get_base_dir()
+    src_exe = os.path.join(base_dir, "dist", "ErpGoPrintService.exe")
+    if not os.path.exists(src_exe):
+        src_exe = os.path.join(base_dir, "ErpGoPrintService.exe")
+    dest_exe = os.path.join(target_dir, "ErpGoPrintService.exe")
+
+    subprocess.run(
+        ["taskkill", "/F", "/IM", "ErpGoPrintService.exe"],
+        capture_output=True,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    time.sleep(0.8)
+
+    if os.path.exists(src_exe):
+        for _ in range(15):
+            try:
+                shutil.copy2(src_exe, dest_exe)
+                break
+            except Exception:
+                time.sleep(0.5)
+
+    src_cfg = os.path.join(base_dir, "config.json")
+    if not os.path.exists(src_cfg):
+        src_cfg = os.path.join(base_dir, "config.example.json")
+    dest_cfg = os.path.join(target_dir, "config.json")
+    if os.path.exists(src_cfg) and not os.path.exists(dest_cfg):
+        shutil.copy2(src_cfg, dest_cfg)
+
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE)
+        winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, f'"{dest_exe}"')
+        winreg.CloseKey(key)
+    except Exception:
+        pass
+
+    if os.path.exists(dest_exe):
+        subprocess.Popen([dest_exe], cwd=target_dir, close_fds=True)
+
+
 def main():
+    if "--silent" in sys.argv:
+        run_silent_install()
+        sys.exit(0)
+
     app = QApplication(sys.argv)
     wizard = QWizard()
     wizard.setWindowTitle("KCSM Print Service Setup")
