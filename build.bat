@@ -30,7 +30,7 @@ pyinstaller --noconsole ^
             --onefile ^
             --name "KCSM_PrintService_Setup" ^
             --add-data "dist\ErpGoPrintService.exe;dist" ^
-            --add-data "config.json;." ^
+            --add-data "config.example.json;." ^
             --hidden-import "PyQt6" ^
             --hidden-import "PyQt6.QtWidgets" ^
             --hidden-import "PyQt6.QtCore" ^

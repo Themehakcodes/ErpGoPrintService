@@ -1,4 +1,4 @@
-"""
+﻿"""
 Application version metadata for KCSM Print Service.
 Bump APP_VERSION before tagging a new GitHub Release (e.g. v1.2.0).
 """

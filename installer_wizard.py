@@ -21,6 +21,10 @@ APP_NAME = "KCSMPrintService"
 
 def get_base_dir():
     if getattr(sys, 'frozen', False):
+        # PyInstaller --onefile extracts bundled --add-data files into sys._MEIPASS
+        meipass = getattr(sys, '_MEIPASS', None)
+        if meipass and os.path.exists(meipass):
+            return meipass
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
 
@@ -143,11 +147,25 @@ class InstallProgressPage(QWizardPage):
         dest_exe = os.path.join(target_dir, "ErpGoPrintService.exe")
 
         try:
+            # Stop any currently running instance cleanly so upgrades overwrite cleanly
+            import subprocess
+            import time
+            subprocess.run(
+                ["taskkill", "/F", "/IM", "ErpGoPrintService.exe"],
+                capture_output=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            time.sleep(0.6)
+
             if os.path.exists(src_exe):
                 shutil.copy2(src_exe, dest_exe)
+            else:
+                raise FileNotFoundError(f"Bundled executable not found at {src_exe}")
             self.progress.setValue(50)
 
             src_cfg = os.path.join(base_dir, "config.json")
+            if not os.path.exists(src_cfg):
+                src_cfg = os.path.join(base_dir, "config.example.json")
             dest_cfg = os.path.join(target_dir, "config.json")
             if os.path.exists(src_cfg) and not os.path.exists(dest_cfg):
                 shutil.copy2(src_cfg, dest_cfg)
